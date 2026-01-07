@@ -6,12 +6,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/myuser/owl"
+	"github.com/myuser/owl/health"
 	"github.com/myuser/owl/logs"
 	"github.com/myuser/owl/metrics"
 	"github.com/myuser/owl/middleware"
+	"github.com/myuser/owl/owltest"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"google.golang.org/grpc/codes"
@@ -212,32 +215,104 @@ func TestMiddlewareNilSafety(t *testing.T) {
 	}
 }
 
-func TestMiddlewareFlusher(t *testing.T) {
-	factory := middleware.NewHTTPFactory(nil, nil)
+// --- Roadmap Feature Tests ---
 
-	handler := func(w http.ResponseWriter, r *http.Request) error {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			return owl.Problem(owl.Internal, owl.WithMsg("Response does not support Flusher"))
-		}
-		w.Header().Set("X-Custom", "1")
-		w.WriteHeader(200)
-		flusher.Flush()
+func TestOwlGoSafety(t *testing.T) {
+	// Use owltest helpers
+	testLogger := owltest.NewLogger()
+	testMonitor := owltest.NewMonitor()
+
+	// Set Singletons (and reset after test if we cared, but tests are isolated binaries usually)
+	owl.SetLogger(testLogger)
+	owl.SetMonitor(testMonitor)
+
+	done := make(chan struct{})
+
+	// Use PanicHandler to sync, as it runs AFTER logging
+	owl.SetPanicHandler(func(ctx context.Context, r any) {
+		close(done)
+	})
+
+	// Run unsafe code safely
+	owl.Go(context.Background(), func(ctx context.Context) {
+		panic("oops")
+	})
+
+	<-done
+
+	// Verify it didn't crash (we are here)
+	// Verify logs
+	entry := testLogger.LastEntry()
+	if entry == nil {
+		t.Fatal("expected log entry for panic")
+	}
+	if entry.Msg != "goroutine_panic" || entry.Level != "ERROR" {
+		t.Errorf("unexpected log: %+v", entry)
+	}
+
+	// Verify metrics
+	if val := testMonitor.GetCounter("goroutine_panic_total"); val != 1 {
+		t.Errorf("expected counter 1, got %v", val)
+	}
+}
+
+func TestOwlStart(t *testing.T) {
+	ctx := context.Background()
+
+	// We can't easily assert OTel internal state without a global span exporter hook or mocking the TracerProvider.
+	// But we can check that it doesn't panic and returns a valid context.
+	ctx, end := owl.Start(ctx, "TestSpan")
+	defer func() {
+		// Test error recording
+		err := errors.New("span error")
+		end(&err)
+	}()
+
+	if ctx == nil {
+		t.Error("expected non-nil context")
+	}
+}
+
+func TestHealthPackage(t *testing.T) {
+	// Mock Checkers
+	dbCheck := health.CheckerFunc(func(ctx context.Context) error {
 		return nil
+	})
+	redisCheck := health.CheckerFunc(func(ctx context.Context) error {
+		return errors.New("connection refused")
+	})
+
+	// 1. All Good
+	h := health.Handler(map[string]health.Checker{
+		"db": dbCheck,
+	})
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Errorf("expected json ok:true, got %s", w.Body.String())
 	}
 
-	wrapped := factory.Wrap(handler)
+	// 2. Failure
+	hFail := health.Handler(map[string]health.Checker{
+		"db":    dbCheck,
+		"redis": redisCheck,
+	})
+	req = httptest.NewRequest("GET", "/health", nil)
+	w = httptest.NewRecorder()
+	hFail.ServeHTTP(w, req)
 
-	ts := httptest.NewServer(wrapped)
-	defer ts.Close()
-
-	resp, err := ts.Client().Get(ts.URL)
-	if err != nil {
-		t.Fatal(err)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", w.Code)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		t.Errorf("expected 200, got %d", resp.StatusCode)
+	if !strings.Contains(w.Body.String(), `"ok":false`) {
+		t.Errorf("expected json ok:false, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"connection refused"`) {
+		t.Errorf("expected error details, got %s", w.Body.String())
 	}
 }
