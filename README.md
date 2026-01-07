@@ -123,6 +123,67 @@ if err != nil {
 }
 ```
 
+### 6. Safe Concurrency (`owl.Go`)
+
+Spawn background goroutines safely. If they panic, the panic is recovered, logged (with stack trace), and the stack does not crash.
+
+```go
+owl.Go(ctx, func(ctx context.Context) {
+    // If this panics, it is logged to owl.Logger and "goroutine_panic_total" metric is incremented.
+    processBackgroundJob()
+})
+```
+
+### 7. Tracing Helper (`owl.Start`)
+
+Reduce boilerplate when starting OTel spans.
+
+```go
+func MyFunc(ctx context.Context) error {
+    ctx, end := owl.Start(ctx, "MyFunc")
+    var err error
+    defer end(&err) // Automatically records error and sets status if err != nil
+
+    return doWork()
+}
+```
+
+### 8. Health Checks (`health`)
+
+Standardized JSON health check handler.
+
+```go
+import "github.com/myuser/owl/health"
+
+func main() {
+    checks := map[string]health.Checker{
+        "db": dbChecker{},
+        "redis": redisChecker{},
+    }
+    
+    http.Handle("/health", health.Handler(checks))
+}
+```
+
+### 9. Testing (`owltest`)
+
+Easily test your code's observability side-effects without mocking OTel providers.
+
+```go
+import "github.com/myuser/owl/owltest"
+
+func TestMyLog logic(t *testing.T) {
+    logger := owltest.NewLogger()
+    owl.SetLogger(logger)
+    
+    MyFunction()
+    
+    if logger.LastEntry().Msg != "expected msg" {
+        t.Fail()
+    }
+}
+```
+
 ## 🧩 Architecture
 
 -   **`root`**: Core types (`Error`, `Code`, interfaces).
