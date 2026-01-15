@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -49,19 +50,21 @@ func (c *HTTPClient) RoundTrip(req *http.Request) (*http.Response, error) {
 	duration := time.Since(start).Seconds()
 
 	// 3. Logging
-	fields := []any{
-		"duration", duration,
-		"method", req.Method,
-		"url", req.URL.String(),
-	}
-
 	if err != nil {
-		c.Logger.Error(ctx, "outbound_request_failed", err, fields...)
+		c.Logger.Error(ctx, "outbound_request_failed", err,
+			"duration", duration,
+			"method", req.Method,
+			"url", req.URL.String(),
+		)
 		return nil, err
 	}
 
-	fields = append(fields, "status", resp.StatusCode)
-	c.Logger.Info(ctx, "outbound_request_success", fields...)
+	c.Logger.Info(ctx, "outbound_request_success",
+		"duration", duration,
+		"method", req.Method,
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+	)
 
 	return resp, nil
 }
@@ -96,8 +99,19 @@ func CheckResponse(resp *http.Response) error {
 	// Note: Strings.Contains is often safer for "application/json; charset=utf-8"
 	// but let's just proceed with safe Logic.
 
-	reader := io.LimitReader(resp.Body, 64*1024)
-	body, _ := io.ReadAll(reader)
+	// Limit read to 64KB for safety
+	limitReader := io.LimitReader(resp.Body, 64*1024)
+	body, _ := io.ReadAll(limitReader)
+
+	// CRITICAL FIX: Restore the response body so downstream consumers can read it.
+	// We matched up to 64KB. We need to construct a reader that:
+	// 1. Reads the bytes we just consumed
+	// 2. Reads the rest of the original resp.Body
+	// 3. Closes the original resp.Body when Close() is called
+	resp.Body = &compositeReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(body), resp.Body),
+		Closer: resp.Body,
+	}
 
 	if isJSON || (len(body) > 0 && body[0] == '{') {
 		var owlErr owl.Error
@@ -112,6 +126,20 @@ func CheckResponse(resp *http.Response) error {
 		owl.FromHTTPStatus(resp.StatusCode),
 		owl.WithMsg(string(body)),
 	)
+}
+
+// compositeReadCloser combines a Reader (for the restored body) and a Closer (the original body).
+type compositeReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func (c *compositeReadCloser) Read(p []byte) (n int, err error) {
+	return c.Reader.Read(p)
+}
+
+func (c *compositeReadCloser) Close() error {
+	return c.Closer.Close()
 }
 
 // UnaryClientInterceptor returns a new unary client interceptor that injects trace context and logs requests.

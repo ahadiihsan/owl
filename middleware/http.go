@@ -143,19 +143,21 @@ func (f *HTTPFactory) Wrap(h HTTPHandler) http.Handler {
 				isObsErr = true
 			}
 
-			// Fields for structured logging
-			fields := []any{
-				"status", status,
-				"duration", duration,
-				"method", r.Method,
-				"path", r.URL.Path,
-			}
-
 			if isObsErr {
 				// Log the internal message + details
-				f.logger.Error(ctx, obsErr.Msg, obsErr.Err, fields...)
+				f.logger.Error(ctx, obsErr.Msg, obsErr.Err,
+					"status", status,
+					"duration", duration,
+					"method", r.Method,
+					"path", r.URL.Path,
+				)
 			} else {
-				f.logger.Error(ctx, "request_failed", err, fields...)
+				f.logger.Error(ctx, "request_failed", err,
+					"status", status,
+					"duration", duration,
+					"method", r.Method,
+					"path", r.URL.Path,
+				)
 			}
 
 			// Write Response for Client using Encoder

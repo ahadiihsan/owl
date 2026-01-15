@@ -1,5 +1,9 @@
 package owl
 
+import (
+	"errors"
+)
+
 // Option defines the functional option pattern for errors.
 type Option func(*Error)
 
@@ -39,9 +43,14 @@ func WithOp(op string) Option {
 }
 
 // WithErr wraps an underlying error.
+// If an error is already wrapped, it joins them (Go 1.20+ behavior).
 func WithErr(err error) Option {
 	return func(e *Error) {
-		e.Err = err
+		if e.Err != nil {
+			e.Err = errors.Join(e.Err, err)
+		} else {
+			e.Err = err
+		}
 	}
 }
 
